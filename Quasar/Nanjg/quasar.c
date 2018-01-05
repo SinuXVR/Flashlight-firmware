@@ -14,7 +14,7 @@
  * > Battcheck: perform 10-16 fast clicks to display battery percentage (up to 4 blinks for 100%, 75%, 50% and < 25%)
  *
  * Flash command:
- * > avrdude -p t13 -c usbasp -u -Uflash:w:waterfall.hex:a -Ulfuse:w:0x75:m -Uhfuse:w:0xFF:m
+ * > avrdude -p t13 -c usbasp -u -Uflash:w:quasar.hex:a -Ulfuse:w:0x75:m -Uhfuse:w:0xFF:m
  */
 
 #define F_CPU 4800000	// CPU: 4.8MHz  PWM: 9.4kHz
