@@ -242,14 +242,14 @@ int main(void) {
 	// Blink at first mode for group change
 	if (mode == 0) {
 		PWM = mypwm;
-		doSleep(100);
+		doSleep(LOCKTIME * 2);
 		byte nextGroup = group + 1;
 		nextGroup = nextGroup % GROUPS_COUNT;
 		eepSave(codeGroupAndMode(nextGroup, 0));
 		PWM = 0;
-		doSleep(5);
+		doSleep(LOCKTIME / 10);
 		PWM = mypwm;
-		doSleep(50);
+		doSleep(LOCKTIME);
 		#ifdef MEM_NEXT
 			eepSave(codeGroupAndMode(group, getNextMode()));
 		#else
