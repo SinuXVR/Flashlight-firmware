@@ -1,20 +1,20 @@
 /*
- * Quasar v1.0 firmware for Nanjg 105C/D flashlight drivers
+ * Quasar v2.0 firmware for Nanjg 105C/D flashlight drivers
  * Copyright SinuX 2018
  * License: CC-BY-NC-SA (non-commercial use only, derivative works must be under the same license)
  * Based on DrJones LuxDrv 0.30b
  *
  * Key features:
- * > Up to 16 mode groups, each group may include up to 8 modes
+ * > Up to 16 mode groups, each group may have up to 16 modes
  * > Acts like factory Nanjg 105D 2-group firmware (switch to first mode, wait 2s for blink and click to change modes group)
  * > Uses on-time memory with wear leveling to support lighted tail switches
  * > Additional blinking modes: Police Strobe and SOS
  * > Three memory modes: last, first and next
  * > Low voltage indication
- * > Battcheck: perform 10-16 fast clicks to display battery percentage (up to 4 blinks for 100%, 75%, 50% and < 25%)
+ * > Battcheck: perform 16 fast clicks to display battery percentage (up to 4 blinks for 100%, 75%, 50% and < 25%)
  *
  * Flash command:
- * > avrdude -p t13 -c usbasp -u -Uflash:w:quasar.hex:a -Ulfuse:w:0x75:m -Uhfuse:w:0xFF:m
+ * > avrdude -p t13 -c usbasp -u -Uflash:w:quasar.hex:a -Ulfuse:w:0x75:m -Uhfuse:w:0xFD:m
  */
 
 #define F_CPU 4800000	// CPU: 4.8MHz  PWM: 9.4kHz
@@ -31,19 +31,15 @@
 
 /* Dependencies */
 #include <avr/pgmspace.h>
-#include <avr/io.h>
 #include <avr/interrupt.h>
-#include <avr/sleep.h>
-#include <avr/eeprom.h>
 
 /* Setup */
 #define byte uint8_t
-#define word uint16_t
 #define WDTIME 0b01000000
 #define sleepinit() do { WDTCR = WDTIME; sei(); MCUCR = (MCUCR & ~0b00111000) | 0b00100000; } while (0) // WDT-int and Idle-Sleep
 #define SLEEP asm volatile ("SLEEP")
-#define pwminit() do { TCCR0A = 0b00100001; TCCR0B = 0b00000001; } while (0)  // Chan A, phasePWM, clk/1 -> 2.35kHz @ 1.2MHz
-#define adcinit() do { ADMUX = 0b01100000 | adcchn; ADCSRA = 0b11000100; } while (0) // Ref 1.1V, left-adjust, ADC1/PB2; enable, start, clk/16
+#define pwminit() do { TCCR0A = 0b00100001; TCCR0B = 0b00000001; } while (0)			// Chan A, phasePWM, clk/1 -> 2.35kHz @ 1.2MHz
+#define adcinit() do { ADMUX = 0b01100000 | adcchn; ADCSRA = 0b11000100; } while (0)	// Ref 1.1V, left-adjust, ADC1/PB2; enable, start, clk/16
 #define adcread() do { ADCSRA |= 64; while (ADCSRA & 64); } while (0)
 #define adcresult ADCH
 #define ADCoff ADCSRA &= ~(1 << 7) // ADC off (enable = 0);
@@ -54,68 +50,111 @@
 #define STROBE		254
 #define PSTROBE		253
 #define SOS			252
-#define BATTCHECK
+#define BATTCHECK	16			// Amount of fast clicks to trigger BATTCHECK mode
 
-/* Groups and modes */
-#define MEM_LAST			// Memory mode: MEM_FIRST, MEM_NEXT, MEM_LAST
-#define MODES_COUNT		7	// 7 modes per group
-#define GROUPS_COUNT	2	// 2 groups
-// Max groups count - 16, max modes count - 8
-PROGMEM const byte groups[GROUPS_COUNT][MODES_COUNT] = {{ 6, 32, 128, 255, 0, 0, 0 },	// Zero slots will be ignored
-														{ 6, 32, 128, 255, STROBE, PSTROBE, SOS }};
+#define MEM_LAST				// Memory mode: MEM_FIRST, MEM_NEXT, MEM_LAST
+
+/* Max groups count - 16, max modes count - 16
+ * Use PowerOfTwo values (2, 4, 8, 16) to reduce firmware size */
+#define MODES_COUNT			8	// 7 modes per group (last slot is empty)
+#define GROUPS_COUNT		2	// 2 groups
+#define GROUP_CHANGE_MODE	0	// Mode number for group change blink
+
+PROGMEM const byte groups[GROUPS_COUNT][MODES_COUNT] = {{ 6, 32, 128, 255, 0, 0, 0, 0 },	// Zero slots will be ignored
+														{ 6, 32, 128, 255, STROBE, PSTROBE, SOS, 0 }};
 
 														
 /* ============================================================================================================================================ */
 
 
-volatile byte mypwm = 0;
+#ifdef BATTCHECK
+	byte shortClicks = 0;
+#endif
 volatile byte group = 0;
 volatile byte mode = 0;
-
 byte ticks = 0;
-byte pmode = 0;
-byte eep[32];	// EEPROM buffer
 byte eepos = 0;
-byte lowbattCounter = 0;
-
-#ifdef BATTCHECK
-	word battcheckCounter __attribute__ ((section (".noinit")));
-#endif
-
-
-/* Extract group num from byte (*GGGG***b) */
-inline byte decodeGroup(byte data) {
-	return (data & 0x78) >> 3;
-}
-
-
-/* Extract memory num from byte (*****MMMb) */
-inline byte decodeMode(byte data) {
-	return data & 0x7;
-}
-
-
-/* Combine group and mode to single byte (0GGGGMMMb), max group num - 15, max mode num - 7 */
-inline byte codeGroupAndMode(byte a, byte b) {
-	return a << 3 | b;
-}
-
-
-/* Write byte to EEPROM with wear leveling */
-void eepSave(byte data) {
-	byte oldpos = eepos;
-	eepos = (eepos + 1) & 31; // Wear leveling, use next cell
-	EEARL = eepos; EEDR = data; EECR = 32 + 4; EECR = 32 + 4 + 2; // 32:write only (no erase) 4:enable  2:go
-	while (EECR & 2); // Wait for completion
-	EEARL = oldpos; EECR = 16 + 4; EECR = 16 + 4 + 2; // 16:erase only (no write) 4:enable  2:go
-}
 
 
 /* Get next mode number */
 byte getNextMode(void) {
-	byte nextMode = mode + 1;
-	if (nextMode >= MODES_COUNT || !pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
+	byte nextMode = (mode + 1) % MODES_COUNT;
+	if (!pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
 	return nextMode;
+}
+
+
+/* Write word to EEPROM with wear leveling */
+void eepSave(byte c, byte g, byte m) {
+	cli();	// Disable interrupts
+	byte oldpos = eepos;
+	eepos = (eepos + 2) & 31; // Wear leveling, use next cell
+	
+	// Write first byte
+	EEARL = eepos; EEDR = c; EECR = 32 + 4; EECR = 32 + 4 + 2; // 32:write only (no erase) 4:enable  2:go
+	while (EECR & 2); // Wait for completion
+	EEARL = oldpos;	EECR = 16 + 4; EECR = 16 + 4 + 2; // 16:erase only (no write) 4:enable  2:go
+	while (EECR & 2); // Wait for completion
+	
+	// Write second byte
+	EEARL = eepos + 1; EEDR = g << 4 | m; EECR = 32 + 4; EECR = 32 + 4 + 2; // 32:write only (no erase) 4:enable  2:go
+	while (EECR & 2); // Wait for completion
+	EEARL = oldpos + 1; EECR = 16 + 4; EECR = 16 + 4 + 2; // 16:erase only (no write) 4:enable  2:go
+	while (EECR & 2); // Wait for completion
+	sei();	// Enable interrupts
+}
+
+
+/* Decode group from data (0bGGGG****) */
+inline byte decodeGroup(byte data) {
+	return (data >> 4) % GROUPS_COUNT;
+}
+
+
+/* Decode mode from data (0b****MMMM) */
+inline byte decodeMode(byte data) {
+	return (data & 0xf) % MODES_COUNT;
+}
+
+
+/* Read byte from EEPROM */
+byte eepReadByte(byte addr) {
+	while (EECR & 2);
+	EEARL = addr;
+	EECR = 1;
+	return EEDR;
+}
+
+
+/* Load data from EEPROM and write next mode */
+inline void eepLoad(void) {		
+	cli();	// Disable interrupts
+	byte clicksData;
+	while (((clicksData = eepReadByte(eepos)) == 0xff) && (eepos < 30)) eepos++;	// Find first data byte
+	byte groupMode = eepReadByte(eepos + 1);	// Read second data byte
+	sei();	// Enable interrupts
+	
+	if (clicksData != 0xff) {
+		#ifdef BATTCHECK
+			shortClicks = clicksData & 0x7f;
+		#endif
+		group = decodeGroup(groupMode);
+		mode = decodeMode(groupMode);
+		
+		// Last on-time was short
+		if (clicksData & 0x80) {
+			mode = getNextMode();
+			#ifdef BATTCHECK
+				shortClicks++;
+			#endif
+		}
+	}
+	
+	#ifdef BATTCHECK
+		eepSave(shortClicks | 0x80, group, mode); // Write mode, with short-on marker
+	#else
+		eepSave(0x80, group, mode);
+	#endif
 }
 
 
@@ -128,61 +167,24 @@ byte getBatteryVoltage(void) {
 
 /* WatchDogTimer interrupt */
 ISR(WDT_vect) {
-	if (ticks < 255) ticks++;
-	
-	// Lock mode according to memory type
-	if (ticks == LOCKTIME) {
-		#ifdef MEM_NEXT
-			eepSave(codeGroupAndMode(group, getNextMode()));
-		#else
-			#ifdef MEM_FIRST
-				eepSave(codeGroupAndMode(group, 0));
+	if (ticks < 255) {
+		ticks++;
+		
+		// Lock mode according to memory type
+		if (ticks == LOCKTIME) {
+			#ifdef MEM_NEXT
+				eepSave(0, group, getNextMode());
 			#else
-				#ifdef MEM_LAST
-					eepSave(codeGroupAndMode(group, mode));
+				#ifdef MEM_FIRST
+					eepSave(0, group, 0);
+				#else
+					#ifdef MEM_LAST
+						eepSave(0, group, mode);
+					#endif
 				#endif
 			#endif
-		#endif
-		
-		#ifdef BATTCHECK
-			battcheckCounter = 0;
-		#endif
+		}
 	}
-
-	// Check battery every 100ms
-	#ifdef BATTMON
-		if (getBatteryVoltage() < BATTMON) {
-			if (++lowbattCounter > 8) {
-				mypwm = (mypwm >> 1) + 3;
-				lowbattCounter = 0;
-			}
-		} else lowbattCounter = 0;
-	#endif
-}
-
-
-/* Read current group and mode from EEPROM and write next mode */
-inline void getmode(void) {
-	eeprom_read_block(&eep, 0, 32);							// Read block
-	while ((eep[eepos] == 0xff) && (eepos < 32)) eepos++;	// Find data byte
-	
-	byte groupModeData = eep[eepos];
-	group = decodeGroup(groupModeData);
-	if (group >= GROUPS_COUNT) group = 0;
-	mode = decodeMode(groupModeData);
-	if (mode >= MODES_COUNT) mode = 0;
-
-	// Last on-time was short
-	if (groupModeData & 0x80) {
-		groupModeData &= 0x7f;
-		mode = getNextMode();
-		#ifdef BATTCHECK
-			if (battcheckCounter != 0xaaaa)
-				battcheckCounter = (~battcheckCounter & 1) | (battcheckCounter << 1);
-		#endif
-	}
-	
-	eepSave(codeGroupAndMode(group, mode) | 0x80); // Write mode, with short-on marker
 }
 
 
@@ -192,14 +194,15 @@ void doSleep(byte count) {
 }
 
 
-/* Perform impulses
- * ATTENTION : this method doesn't have low voltage step down */
-inline void doImpulses(byte count, byte onTime, byte offTime) {
+/* Perform impulses */
+void doImpulses(byte count, byte onTime, byte offTime) {
 	while (count--) {
 		PWM = 255;
-		doSleep(onTime);
+		byte time = onTime;
+		while (time--) SLEEP;
 		PWM = 0;
-		doSleep(offTime);
+		time = offTime;
+		while (time--) SLEEP;
 	}
 }
 
@@ -217,14 +220,14 @@ int main(void) {
 	#endif
 	
 	pwminit();
+			
+	eepLoad();	// Get current group and mode from EEPROM
+	byte pmode = pgm_read_byte(&groups[group][mode]);	// Get actual PWM value (or special mode code)
+	byte lowbattCounter = 0;
 	
-	getmode();	// Get current group and mode from EEPROM
-	pmode = pgm_read_byte(&groups[group][mode]);	// Get actual PWM value (or special mode code)
-	mypwm = pmode;
-	
-	// Display battery level after 10-16 fast clicks
+	// Display battery level after BATTCHECK fast clicks
 	#ifdef BATTCHECK
-		if (battcheckCounter == 0xaaaa) {
+		if (shortClicks >= BATTCHECK) {
 			PWM = 0;
 			doSleep(50);
 			byte voltage = getBatteryVoltage();
@@ -234,30 +237,30 @@ int main(void) {
 			else if (voltage >= 145) blinksCount = 2;	// < 50%
 			else blinksCount = 1;						// < 25%
 			doImpulses(blinksCount, 10, 20);
+			shortClicks = 0;
 			doSleep(50);
-			battcheckCounter = 0;
 		}
 	#endif
-	
-	// Blink at first mode for group change
-	if (mode == 0) {
-		PWM = mypwm;
+
+	// Blink for group change
+	if (mode == GROUP_CHANGE_MODE) {
+		PWM = pmode;
 		doSleep(LOCKTIME * 2);
-		byte nextGroup = group + 1;
-		nextGroup = nextGroup % GROUPS_COUNT;
-		eepSave(codeGroupAndMode(nextGroup, 0));
+		byte nextGroup = (group + 1) % GROUPS_COUNT;
+		eepSave(0, nextGroup, 0);
 		PWM = 0;
 		doSleep(LOCKTIME / 10);
-		PWM = mypwm;
+		PWM = pmode;
 		doSleep(LOCKTIME);
 		#ifdef MEM_NEXT
-			eepSave(codeGroupAndMode(group, getNextMode()));
+			eepSave(0, group, getNextMode());
 		#else
-			eepSave(codeGroupAndMode(group, 0));
+			eepSave(0, group, GROUP_CHANGE_MODE);
 		#endif
 	}
 
 	// Do the work according to current mode
+	// ATTENTION: blinking modes don't have low voltage indication
 	switch (pmode) {
 		// Strobe
 		#ifdef STROBE
@@ -291,10 +294,19 @@ int main(void) {
 
 		// All other: use as PWM value
 		default:
-			mypwm = pmode;
 			while (1) {
-				PWM = mypwm;
-				doSleep(10);
+				// Check battery
+				#ifdef BATTMON
+					if (getBatteryVoltage() < BATTMON) {
+						if (++lowbattCounter > 8) {
+							pmode = (pmode >> 1) + 3;
+							lowbattCounter = 0;
+						}
+					} else lowbattCounter = 0;
+				#endif
+
+				PWM = pmode;
+				doSleep(10); // 200ms delay
 			}
 			
 	} // Switch
