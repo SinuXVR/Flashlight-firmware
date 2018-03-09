@@ -247,7 +247,7 @@ int main(void) {
 		PWM = pmode;
 		doSleep(LOCKTIME * 2);
 		byte nextGroup = (group + 1) % GROUPS_COUNT;
-		eepSave(0, nextGroup, 0);
+		eepSave(0, nextGroup, GROUP_CHANGE_MODE);
 		PWM = 0;
 		doSleep(LOCKTIME / 10);
 		PWM = pmode;
