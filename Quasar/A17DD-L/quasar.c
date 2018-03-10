@@ -283,7 +283,8 @@ int main(void) {
 	if (mode == GROUP_CHANGE_MODE) {
 		setPWM(pmode);
 		doSleep(LOCKTIME * 2);
-		byte nextGroup = (group + 1) % GROUPS_COUNT;
+		byte nextGroup = group + 1;
+		if (nextGroup >= GROUPS_COUNT) nextGroup = 0;
 		eepSave(0, nextGroup, GROUP_CHANGE_MODE);
 		setPWM(0);
 		doSleep(LOCKTIME / 10);

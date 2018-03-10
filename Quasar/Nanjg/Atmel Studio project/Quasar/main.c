@@ -78,8 +78,8 @@ byte eepos = 0;
 
 /* Get next mode number */
 byte getNextMode(void) {
-	byte nextMode = (mode + 1) % MODES_COUNT;
-	if (!pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
+	byte nextMode = mode + 1;
+	if (nextMode >= MODES_COUNT || !pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
 	return nextMode;
 }
 
@@ -119,7 +119,6 @@ inline byte decodeMode(byte data) {
 
 /* Read byte from EEPROM */
 byte eepReadByte(byte addr) {
-	while (EECR & 2);
 	EEARL = addr;
 	EECR = 1;
 	return EEDR;
@@ -130,6 +129,7 @@ byte eepReadByte(byte addr) {
 inline void eepLoad(void) {		
 	cli();	// Disable interrupts
 	byte clicksData;
+	while (EECR & 2);
 	while (((clicksData = eepReadByte(eepos)) == 0xff) && (eepos < 30)) eepos++;	// Find first data byte
 	byte groupMode = eepReadByte(eepos + 1);	// Read second data byte
 	sei();	// Enable interrupts
@@ -246,7 +246,8 @@ int main(void) {
 	if (mode == GROUP_CHANGE_MODE) {
 		PWM = pmode;
 		doSleep(LOCKTIME * 2);
-		byte nextGroup = (group + 1) % GROUPS_COUNT;
+		byte nextGroup = group + 1;
+		if (nextGroup >= GROUPS_COUNT) nextGroup = 0;
 		eepSave(0, nextGroup, GROUP_CHANGE_MODE);
 		PWM = 0;
 		doSleep(LOCKTIME / 10);
@@ -306,7 +307,7 @@ int main(void) {
 				#endif
 
 				PWM = pmode;
-				doSleep(10); // 200ms delay
+				doSleep(50); // 1s delay
 			}
 			
 	} // Switch
