@@ -91,16 +91,16 @@ void eepSave(byte c, byte g, byte m) {
 	eepos = (eepos + 2) & 31; // Wear leveling, use next cell
 	
 	// Write first byte
+	while (EECR & 2); // Wait for completion
 	EEARL = eepos; EEDR = c; EECR = 32 + 4; EECR = 32 + 4 + 2; // 32:write only (no erase) 4:enable  2:go
 	while (EECR & 2); // Wait for completion
 	EEARL = oldpos;	EECR = 16 + 4; EECR = 16 + 4 + 2; // 16:erase only (no write) 4:enable  2:go
-	while (EECR & 2); // Wait for completion
 	
 	// Write second byte
+	while (EECR & 2); // Wait for completion
 	EEARL = eepos + 1; EEDR = g << 4 | m; EECR = 32 + 4; EECR = 32 + 4 + 2; // 32:write only (no erase) 4:enable  2:go
 	while (EECR & 2); // Wait for completion
 	EEARL = oldpos + 1; EECR = 16 + 4; EECR = 16 + 4 + 2; // 16:erase only (no write) 4:enable  2:go
-	while (EECR & 2); // Wait for completion
 	sei();	// Enable interrupts
 }
 
