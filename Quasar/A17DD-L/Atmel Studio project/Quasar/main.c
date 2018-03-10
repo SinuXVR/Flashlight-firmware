@@ -7,10 +7,12 @@
  * Key features:
  * > Up to 16 mode groups, each group may have up to 16 modes
  * > Acts like factory Nanjg 105D 2-group firmware (switch to first mode, wait 2s for blink and click to change modes group)
- * > Off-time memory with wear leveling
+ * > Combined On+Off-time memory with wear leveling
  * > Additional blinking modes: Police Strobe and SOS
  * > Three memory modes: last, first and next
  * > Low voltage indication
+ * > Turbo timer
+ * > Double channel output for FET/AMC7135
  * > Battcheck: perform 16 fast clicks to display battery percentage (up to 4 blinks for 100%, 75%, 50% and < 25%)
  *
  * Flash command:
@@ -41,9 +43,10 @@
 #define sleepinit() do { WDTCR = WDTIME; sei(); MCUCR = (MCUCR & ~0b00111000) | 0b00100000; } while (0) // WDT-int and Idle-Sleep
 #define SLEEP asm volatile ("SLEEP")
 #define pwminit() do { TCCR0A = 0b10100001; TCCR0B = 0b00000001; FET_PWM = 0; AMC_PWM = 0; } while (0)  // Chan A & B, phasePWM, clk/1 -> 2.35kHz @ 1.2MHz
-#define batadcinit() do { ADMUX = 0b01100000 | batchn; ADCSRA = 0b11000100; } while (0)	// Ref 1.1V, left-adjust, ADC1/PB2; enable, start, clk/16
 #define capadcinit() do { ADMUX = 0b01100000 | capchn; ADCSRA = 0b11000100; } while (0)	// Ref 1.1V, left-adjust, ADC3/PB3; enable, start, clk/16
+#define batadcinit() do { ADMUX = 0b01100000 | batchn; } while (0)	// Ref 1.1V, left-adjust, ADC1/PB2; enable, start, clk/16
 #define chargecap() do { DDRB |= (1 << cappin); PORTB |= (1 << cappin); } while (0)
+#define dischargecap() do { PORTB &= ~(1 << cappin); } while (0)
 #define adcread() do { ADCSRA |= 64; while (ADCSRA & 64); } while (0)
 #define adcresult ADCH
 #define ADCoff ADCSRA &= ~(1 << 7) // ADC off (enable = 0)
@@ -61,6 +64,7 @@
 #define MEM_LAST			// Memory mode: MEM_FIRST, MEM_NEXT, MEM_LAST
 #define CAP_THRESHOLD	190	// Threshold voltage on the OTC
 #define LOCKTIME 50			// Time in 1/50s until a group gets locked after blink, e.g. 50/50 = 1s
+#define ONTIME_LOCK			// Use on-time mode locking, comment out to disable
 
 /* Max groups count - 16, max modes count - 16
  * Use PowerOfTwo values (2, 4, 8, 16) to reduce firmware size */
@@ -85,6 +89,7 @@ PROGMEM const sbyte groups[GROUPS_COUNT][MODES_COUNT] = {{ -3, -127, 64, 127, 0,
 byte group = 0;
 byte mode = 0;
 byte eepos = 0;
+byte ticks = 0;
 #ifdef TURBO_TIMEOUT
 	byte turboTicks = 0;
 #endif
@@ -92,7 +97,14 @@ byte eepos = 0;
 
 /* WatchDogTimer interrupt */
 ISR(WDT_vect) {
-	// Do nothing
+	#ifdef ONTIME_LOCK
+		if (ticks < 255) {
+			ticks++;
+			if (ticks == LOCKTIME) {
+				dischargecap();
+			}
+		}
+	#endif
 }
 
 
@@ -111,8 +123,8 @@ byte getADCResult(void) {
 
 /* Get next mode number */
 byte getNextMode(void) {
-	byte nextMode = (mode + 1) % MODES_COUNT;
-	if (!pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
+	byte nextMode = mode + 1;
+	if (nextMode >= MODES_COUNT || !pgm_read_byte(&groups[group][nextMode])) nextMode = 0;
 	return nextMode;
 }
 
@@ -150,7 +162,6 @@ inline byte decodeMode(byte data) {
 
 /* Read byte from EEPROM */
 byte eepReadByte(byte addr) {
-	while (EECR & 2);
 	EEARL = addr;
 	EECR = 1;
 	return EEDR;
@@ -160,6 +171,7 @@ byte eepReadByte(byte addr) {
 /* Load data from EEPROM and write next mode */
 inline void eepLoad(void) {
 	byte clicksData;
+	while (EECR & 2);
 	while (((clicksData = eepReadByte(eepos)) == 0xff) && (eepos < 30)) eepos++;	// Find first data byte
 	byte groupMode = eepReadByte(eepos + 1);	// Read second data byte
 	
@@ -170,8 +182,9 @@ inline void eepLoad(void) {
 		group = decodeGroup(groupMode);
 		mode = decodeMode(groupMode);
 		
-		// Last on-time was short
 		getADCResult();
+		
+		// Last on-time was short
 		if (getADCResult() > CAP_THRESHOLD) {
 			mode = getNextMode();
 			#ifdef BATTCHECK
@@ -217,10 +230,11 @@ void doImpulses(byte count, byte onTime, byte offTime) {
 void setPWM(sbyte value) {
 	FET_PWM = 0;
 	AMC_PWM = 0;
+	if (value == 0) return;
 	
 	if (value > 0) {
 		FET_PWM = (value << 1) + 1;
-	} else if (value < 0) {
+	} else {
 		AMC_PWM = (-value << 1) + 1;
 	}
 }
@@ -232,8 +246,8 @@ int main(void) {
 	sleepinit();
 	ACoff;
 	
-	capadcinit();
-			
+	capadcinit();	
+	
 	eepLoad();	// Get current group and mode from EEPROM
 	byte pmode = pgm_read_byte(&groups[group][mode]);	// Get actual PWM value (or special mode code)
 	
@@ -252,7 +266,6 @@ int main(void) {
 	// Display battery level after BATTCHECK fast clicks
 	#ifdef BATTCHECK
 		if (shortClicks >= BATTCHECK) {
-			FET_PWM = 0;
 			doSleep(50);
 			byte voltage = getADCResult();
 			byte blinksCount;
