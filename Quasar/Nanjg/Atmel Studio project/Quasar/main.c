@@ -243,22 +243,24 @@ int main(void) {
 	#endif
 
 	// Blink for group change
-	if (mode == GROUP_CHANGE_MODE) {
-		PWM = pmode;
-		doSleep(LOCKTIME * 2);
-		byte nextGroup = group + 1;
-		if (nextGroup >= GROUPS_COUNT) nextGroup = 0;
-		eepSave(0, nextGroup, GROUP_CHANGE_MODE);
-		PWM = 0;
-		doSleep(LOCKTIME / 10);
-		PWM = pmode;
-		doSleep(LOCKTIME);
-		#ifdef MEM_NEXT
-			eepSave(0, group, getNextMode());
-		#else
-			eepSave(0, group, GROUP_CHANGE_MODE);
-		#endif
+	#if (GROUPS_COUNT > 1)
+		if (mode == GROUP_CHANGE_MODE) {
+			PWM = pmode;
+			doSleep(LOCKTIME * 2);
+			byte nextGroup = group + 1;
+			if (nextGroup >= GROUPS_COUNT) nextGroup = 0;
+			eepSave(0, nextGroup, GROUP_CHANGE_MODE);
+			PWM = 0;
+			doSleep(LOCKTIME / 10);
+			PWM = pmode;
+			doSleep(LOCKTIME);
+			#ifdef MEM_NEXT
+				eepSave(0, group, getNextMode());
+			#else
+				eepSave(0, group, GROUP_CHANGE_MODE);
+			#endif
 	}
+	#endif
 
 	// Do the work according to current mode
 	// ATTENTION: blinking modes don't have low voltage indication
