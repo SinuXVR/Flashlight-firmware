@@ -12,6 +12,7 @@
  * > Three memory modes: last, first and next
  * > Low voltage indication
  * > Battcheck: perform 16 fast clicks to display battery percentage (up to 4 blinks for 100%, 75%, 50% and < 25%)
+ * > Optional turbo timer
  *
  * Flash command:
  * > avrdude -p t13 -c usbasp -u -Uflash:w:quasar.hex:a -Ulfuse:w:0x75:m -Uhfuse:w:0xFD:m
@@ -50,7 +51,9 @@
 #define STROBE		254
 #define PSTROBE		253
 #define SOS			252
-#define BATTCHECK	16			// Amount of fast clicks to trigger BATTCHECK mode
+#define BATTCHECK	16		// Amount of fast clicks to trigger BATTCHECK mode
+//#define TURBO_TIMEOUT	60	// Uncomment to enable, 60 ~ 60s
+
 
 #define MEM_LAST				// Memory mode: MEM_FIRST, MEM_NEXT, MEM_LAST
 
@@ -69,6 +72,9 @@ PROGMEM const byte groups[GROUPS_COUNT][MODES_COUNT] = {{ 6, 32, 128, 255, 0, 0,
 
 #ifdef BATTCHECK
 	byte shortClicks = 0;
+#endif
+#ifdef TURBO_TIMEOUT
+	byte turboTicks = 0;
 #endif
 volatile byte group = 0;
 volatile byte mode = 0;
@@ -306,6 +312,17 @@ int main(void) {
 							lowbattCounter = 0;
 						}
 					} else lowbattCounter = 0;
+				#endif
+
+				// TURBO timer
+				#ifdef TURBO_TIMEOUT
+					if (turboTicks < TURBO_TIMEOUT) {
+						turboTicks++;
+						} else {
+							if (pmode == 255) {
+								pmode = pmode >> 1;
+							}
+						}
 				#endif
 
 				PWM = pmode;
